@@ -55,6 +55,23 @@ The default execution is a CLI-driven pipeline. PostgreSQL is the only
 required service for database-backed execution; workflow orchestration tools
 are intentionally out of scope for this academic MVP.
 
+## Data Quality API integration
+
+After a run, the pipeline can report its result to the companion
+[Data Quality API](https://github.com/davimatosms/data-quality-api). Set both
+variables to enable it:
+
+```powershell
+$env:QUALITY_API_URL = "http://localhost:8000"
+$env:QUALITY_API_SOURCE_ID = "1"
+python -m src.pipeline --input tests/fixtures/sample_dirty_data.csv
+```
+
+The ETL remains responsible for validation. It sends the API the execution
+timestamp, `PASSING`/`FAILING` status, per-rule results, and metrics. Requests
+use a timeout and retry transient network failures. If the variables are not
+set, the pipeline behaves as before and only prints its local report.
+
 ## What should I do with this project?
 
 If you downloaded this repository and do not know ETL yet, think of it as a

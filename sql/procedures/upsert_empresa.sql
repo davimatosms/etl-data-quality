@@ -1,0 +1,47 @@
+CREATE OR REPLACE FUNCTION upsert_empresas(p_rows JSONB)
+RETURNS TABLE(inserted_count INTEGER, updated_count INTEGER)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    row_data JSONB;
+    was_existing BOOLEAN;
+BEGIN
+    inserted_count := 0;
+    updated_count := 0;
+
+    FOR row_data IN SELECT value FROM jsonb_array_elements(p_rows)
+    LOOP
+        SELECT EXISTS (
+            SELECT 1 FROM empresas WHERE cnpj = row_data->>'cnpj'
+        ) INTO was_existing;
+
+        INSERT INTO empresas (
+            cnpj, razao_social, data_inicio_atividade, cep, uf, municipio
+        )
+        VALUES (
+            row_data->>'cnpj',
+            row_data->>'razao_social',
+            NULLIF(row_data->>'data_inicio_atividade', '')::DATE,
+            row_data->>'cep',
+            row_data->>'uf',
+            row_data->>'municipio'
+        )
+        ON CONFLICT (cnpj)
+        DO UPDATE SET
+            razao_social = EXCLUDED.razao_social,
+            data_inicio_atividade = EXCLUDED.data_inicio_atividade,
+            cep = EXCLUDED.cep,
+            uf = EXCLUDED.uf,
+            municipio = EXCLUDED.municipio,
+            updated_at = NOW();
+
+        IF was_existing THEN
+            updated_count := updated_count + 1;
+        ELSE
+            inserted_count := inserted_count + 1;
+        END IF;
+    END LOOP;
+
+    RETURN NEXT;
+END;
+$$;

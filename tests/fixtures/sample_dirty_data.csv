@@ -1,0 +1,4 @@
+cnpj;razao_social;data_inicio_atividade;cep;uf;municipio
+04.252.011/0001-10;Empresa Valida;2020-01-15;01000000;SP;Sao Paulo
+;Empresa Sem CNPJ;2021-02-20;12345678;RJ;Rio de Janeiro
+04.252.011/0001-10;Empresa Duplicada;2019-03-10;20000000;MG;Belo Horizonte

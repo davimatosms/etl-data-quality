@@ -16,6 +16,7 @@ from src.extract import (
 )
 from src.load import load_dataframe, load_quarantine
 from src.observability import configure_logging
+from src.quality_api import report_check_from_environment
 from src.schemas import DataQualitySchema
 from src.transform import normalize_dataframe
 from src.validate import rejection_counts, validate_dataframe
@@ -151,6 +152,9 @@ def run_pipeline(
         "tempo_segundos": round(time.perf_counter() - started_at, 3),
         "dataset_transformado": preview,
     }
+    api_response = report_check_from_environment(report)
+    if api_response is not None:
+        report["quality_api"] = api_response
     return report
 
 

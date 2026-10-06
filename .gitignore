@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+.pytest_cache/
+coverage.xml
+.DS_Store
+
+data/raw/*
+data/quarantine/*
+!data/raw/.gitkeep
+!data/quarantine/.gitkeep
+
+*.log

@@ -1,31 +1,73 @@
 # ETL Data Quality
 
-An educational ETL pipeline for validating, transforming, and loading
-Brazilian public data into PostgreSQL.
+Educational ETL pipeline for validating, transforming, and loading Brazilian
+public data into PostgreSQL.
 
-The project is intentionally small enough to run locally, but demonstrates
-production-oriented practices:
+> Educational MVP built with production-oriented practices. No real users,
+> intentionally small enough to run locally.
 
-- explicit data-quality rules;
-- rejection quarantine instead of silent data loss;
-- idempotent upserts using a natural key;
-- bounded-memory CSV processing;
-- structured JSON logs and operational metrics;
-- unit and PostgreSQL integration tests;
-- Docker-based local development and GitHub Actions CI.
+[![CI](https://github.com/davimatosms/etl-data-quality/actions/workflows/ci.yml/badge.svg)](https://github.com/davimatosms/etl-data-quality/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.12+-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-## Problem statement
+Python · Pandas · PostgreSQL · Docker · GitHub Actions
+
+> **Part of a two-repo system.** This project works together with
+> [Data Quality API](https://github.com/davimatosms/data-quality-api):
+> the ETL runs the validations, the API tracks the health of each run.
+
+## Table of contents
+
+- [The problem](#the-problem)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [Quick start with PostgreSQL](#quick-start-with-postgresql)
+- [Usage](#usage)
+- [Technical decisions](#technical-decisions)
+- [Testing and quality](#testing-and-quality)
+- [Project structure](#project-structure)
+- [Known limitations and next steps](#known-limitations-and-next-steps)
+- [Related projects](#related-projects)
+- [License](#license)
+
+## The problem
 
 Public datasets commonly contain malformed identifiers, inconsistent
-encodings, missing fields, invalid dates, duplicated records, and
-inconsistent types. Loading these values without validation can silently
-corrupt downstream analysis.
+encodings, missing fields, invalid dates, duplicated records, and inconsistent
+types. Loading these values without validation can silently corrupt downstream
+analysis.
 
 This pipeline keeps the raw input, validates each row, records rejected rows
 with their reasons, transforms accepted rows, and loads only accepted data
-into PostgreSQL.
+into PostgreSQL. It is a quality-checking machine for Brazilian company data:
+it reads a CSV, separates accepted and rejected rows, normalizes accepted
+values such as CNPJ, and keeps rejected rows auditable in quarantine.
 
 ## Architecture
+
+The two repositories work together as follows:
+
+```text
+┌──────────────────────────┐
+│ ETL Data Quality         │
+│ extract → validate →     │
+│ transform → load         │
+└────────────┬─────────────┘
+             │ POST /sources/{id}/checks
+             ▼
+┌──────────────────────────┐
+│ Data Quality API         │
+│ FastAPI + Pydantic       │
+│ freshness on read        │
+└────────────┬─────────────┘
+             ▼
+┌──────────────────────────┐
+│ PostgreSQL               │
+│ sources + checks + rules │
+└──────────────────────────┘
+```
+
+Inside this repository, the default CLI pipeline is:
 
 ```text
 CSV/API input
@@ -51,48 +93,28 @@ Load -> PostgreSQL upsert into empresas
 Report -> JSON metrics + structured logs
 ```
 
-The default execution is a CLI-driven pipeline. PostgreSQL is the only
-required service for database-backed execution; workflow orchestration tools
-are intentionally out of scope for this academic MVP.
+The ETL remains responsible for validation. After a run, it can report the
+execution timestamp, `PASSING`/`FAILING` status, rule results, and metrics to
+the companion API. The API integration is optional; without its environment
+variables, the pipeline behaves as a local ETL.
 
-## Data Quality API integration
+## Quick start
 
-After a run, the pipeline can report its result to the companion
-[Data Quality API](https://github.com/davimatosms/data-quality-api). Set both
-variables to enable it:
-
-```powershell
-$env:QUALITY_API_URL = "http://localhost:8000"
-$env:QUALITY_API_SOURCE_ID = "1"
-python -m src.pipeline --input tests/fixtures/sample_dirty_data.csv
-```
-
-The ETL remains responsible for validation. It sends the API the execution
-timestamp, `PASSING`/`FAILING` status, per-rule results, and metrics. Requests
-use a timeout and retry transient network failures. If the variables are not
-set, the pipeline behaves as before and only prints its local report.
-
-## What should I do with this project?
-
-If you downloaded this repository and do not know ETL yet, think of it as a
-quality-checking machine for a CSV file containing Brazilian company data.
-
-You give it a CSV. It:
-
-1. reads the file;
-2. checks each company record;
-3. separates accepted and rejected rows;
-4. normalizes accepted values, such as removing CNPJ punctuation;
-5. saves rejected rows with the reason for rejection;
-6. optionally stores the accepted data in PostgreSQL.
-
-You do not need to create a CSV to try it. The repository includes a small
-intentionally problematic sample at
+The following demo runs without a database and takes less than two minutes.
+It uses the intentionally problematic sample at
 `tests/fixtures/sample_dirty_data.csv`.
 
-### First try: run it without a database
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 
-From the repository folder, install Python dependencies and run:
+python -m src.pipeline \
+  --input tests/fixtures/sample_dirty_data.csv
+```
+
+<details>
+<summary>Windows (PowerShell)</summary>
 
 ```powershell
 python -m venv .venv
@@ -103,44 +125,57 @@ python -m src.pipeline `
   --input tests/fixtures/sample_dirty_data.csv
 ```
 
-The command prints a JSON report. The sample has three rows:
+</details>
 
-- one valid company;
-- one row without a CNPJ;
-- one duplicate CNPJ.
-
-Therefore, you should see three rows read, one accepted, and two rejected.
-The accepted CNPJ is shown in canonical form, without punctuation. The
-rejected rows are written to a CSV file under `data/quarantine/`.
+The sample contains three rows: one valid company, one row without a CNPJ,
+and one duplicate CNPJ. The report should show three rows read, one accepted,
+and two rejected. Accepted CNPJs are shown in canonical form, without
+punctuation, and rejected rows are written under `data/quarantine/`.
 
 Inspect the generated quarantine file with:
+
+```bash
+find data/quarantine -type f -maxdepth 1 -print -exec cat {} \;
+```
+
+<details>
+<summary>Windows (PowerShell)</summary>
 
 ```powershell
 Get-ChildItem data\quarantine
 Get-Content data\quarantine\*.csv
 ```
 
-This is the easiest way to see the project's main behavior: invalid data is
-not silently discarded and does not enter the valid dataset.
+</details>
 
-### Try the same file in small batches
+To demonstrate bounded-memory processing, run the same input in small batches:
 
-```powershell
-python -m src.pipeline `
-  --input tests/fixtures/sample_dirty_data.csv `
+```bash
+python -m src.pipeline \
+  --input tests/fixtures/sample_dirty_data.csv \
   --chunk-size 2
 ```
 
-The result should still be one accepted row and two rejected rows. This
-demonstrates that the pipeline can process larger files in bounded batches.
+The result should still be one accepted row and two rejected rows.
 
-### Try the database-backed version
+## Quick start with PostgreSQL
 
-If Docker Desktop is installed, start PostgreSQL and run the complete flow:
+With Docker Desktop installed, start PostgreSQL and run the complete flow:
+
+```bash
+docker compose up -d postgres
+export DATABASE_URL="postgresql+psycopg2://etl_user:etl_password@localhost:5432/etl_data_quality"
+
+python -m src.pipeline \
+  --input tests/fixtures/sample_dirty_data.csv \
+  --load
+```
+
+<details>
+<summary>Windows (PowerShell)</summary>
 
 ```powershell
 docker compose up -d postgres
-
 $env:DATABASE_URL = "postgresql+psycopg2://etl_user:etl_password@localhost:5432/etl_data_quality"
 
 python -m src.pipeline `
@@ -148,126 +183,19 @@ python -m src.pipeline `
   --load
 ```
 
-The accepted company is stored in the `empresas` table. Rejected rows are
-also stored in the `quarantine` table. To inspect them:
-
-```powershell
-docker compose exec -T postgres psql `
-  -U etl_user `
-  -d etl_data_quality `
-  -c "SELECT cnpj, razao_social, uf FROM empresas;"
-
-docker compose exec -T postgres psql `
-  -U etl_user `
-  -d etl_data_quality `
-  -c "SELECT source_file, row_data FROM quarantine;"
-```
-
-Run the load command a second time. The number of rows in `empresas` should
-not increase because the pipeline updates an existing CNPJ instead of
-inserting a duplicate. This is the project's idempotency behavior.
-
-## Validation rules
-
-The current implementation validates:
-
-- CNPJ length, repeated-digit values, and check digits;
-- required CNPJ and company name fields;
-- CEP with eight digits;
-- parseable activity dates;
-- duplicate CNPJs within the same input;
-- UTF-8 input with a controlled Latin-1 fallback.
-
-Rejected rows include:
-
-- source line number;
-- original row content;
-- one or more rejection reasons;
-- processing timestamp.
-
-## Repository layout
-
-```text
-etl-data-quality/
-├── .github/workflows/ci.yml       # Unit and PostgreSQL integration CI
-├── data/
-│   ├── raw/                       # Local inputs; ignored except fixtures
-│   └── quarantine/                # Generated rejection files
-├── scripts/
-│   └── fetch_real_cnpj_sample.py # Small public-data demonstration
-├── sql/
-│   ├── init.sql                   # Database initialization
-│   └── procedures/
-│       └── upsert_empresa.sql     # PL/pgSQL reference implementation
-├── src/
-│   ├── db.py                      # SQLAlchemy engine creation
-│   ├── extract.py                 # Raw copy, encoding, and chunk readers
-│   ├── load.py                    # Data and quarantine persistence
-│   ├── observability.py           # JSON logging
-│   ├── pipeline.py                # CLI and orchestration
-│   ├── schemas.py                 # Shared schema constants/helpers
-│   ├── transform.py               # Canonicalization
-│   └── validate.py                # Data-quality rules
-├── tests/
-│   ├── fixtures/
-│   │   └── realistic_cnpj_sample.csv
-│   ├── test_extract.py
-│   ├── test_integration.py        # Runs when TEST_DATABASE_URL is set
-│   ├── test_observability.py
-│   └── test_validate.py
-├── Dockerfile
-├── docker-compose.yml
-├── requirements.txt
-└── README.md
-```
-
-## Requirements
-
-- Python 3.12 or newer;
-- Docker Desktop and Docker Compose;
-- PostgreSQL 16 when running without Docker;
-- network access only when using the optional public-data sample script.
-
-## Quick start
-
-Create and activate a virtual environment, then install dependencies:
-
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-```
-
-Start PostgreSQL:
-
-```powershell
-docker compose up -d postgres
-```
-
-Run validation and transformation without database loading:
-
-```powershell
-python -m src.pipeline `
-  --input tests/fixtures/sample_dirty_data.csv
-```
-
-Run the complete pipeline with PostgreSQL:
-
-```powershell
-$env:DATABASE_URL = "postgresql+psycopg2://etl_user:etl_password@localhost:5432/etl_data_quality"
-
-python -m src.pipeline `
-  --input tests/fixtures/sample_dirty_data.csv `
-  --load
-```
+</details>
 
 The Compose initialization script creates the `empresas` and `quarantine`
-tables automatically on first database startup.
+tables automatically on first database startup. Re-run the load command: the
+number of rows in `empresas` should not increase because the pipeline updates
+an existing CNPJ instead of inserting a duplicate.
 
-> The credentials in `docker-compose.yml` are development-only defaults. Do
-> not reuse them in a shared or production environment.
+The credentials in `docker-compose.yml` are development-only defaults. Do not
+reuse them in a shared or production environment.
 
-## CLI options
+## Usage
+
+### CLI options
 
 ```text
 --input PATH             Required input CSV
@@ -280,6 +208,17 @@ tables automatically on first database startup.
 
 Example for a large file:
 
+```bash
+python -m src.pipeline \
+  --input data/raw/large-cnpj.csv \
+  --chunk-size 10000 \
+  --load \
+  --log-file data/pipeline.log
+```
+
+<details>
+<summary>Windows (PowerShell)</summary>
+
 ```powershell
 python -m src.pipeline `
   --input data/raw/large-cnpj.csv `
@@ -288,57 +227,77 @@ python -m src.pipeline `
   --log-file data/pipeline.log
 ```
 
-## Output and observability
+</details>
 
-The command prints a JSON report containing:
+### Data Quality API integration
 
-- input copy and detected encoding;
-- rows read, accepted, and rejected;
-- rejection counts grouped by rule;
-- inserted and updated database rows;
-- persisted quarantine count;
-- elapsed time;
-- a small transformed-data preview.
+Start the companion API according to its
+[integrated demo](https://github.com/davimatosms/data-quality-api), then set
+the URL and monitored source ID before running the ETL:
+
+```bash
+export QUALITY_API_URL="http://localhost:8000"
+export QUALITY_API_SOURCE_ID="1"
+
+python -m src.pipeline \
+  --input tests/fixtures/sample_dirty_data.csv
+```
+
+<details>
+<summary>Windows (PowerShell)</summary>
+
+```powershell
+$env:QUALITY_API_URL = "http://localhost:8000"
+$env:QUALITY_API_SOURCE_ID = "1"
+
+python -m src.pipeline `
+  --input tests/fixtures/sample_dirty_data.csv
+```
+
+</details>
+
+The current API contract uses Portuguese metric keys because the source
+dataset is Brazilian: `linhas_lidas`, `linhas_validas`, `linhas_rejeitadas`,
+and `tempo_segundos`. Brazilian domain identifiers such as `cnpj`,
+`razao_social`, `cep`, and `empresas` remain unchanged as well.
+
+### Output and observability
+
+The command prints a JSON report containing the input copy and detected
+encoding, row counts, rejection counts grouped by rule, database changes,
+persisted quarantine count, elapsed time, and a transformed-data preview.
+A representative report is:
+
+```json
+{
+  "linhas_lidas": 3,
+  "linhas_validas": 1,
+  "linhas_rejeitadas": 2,
+  "rejeicoes_por_regra": {
+    "missing_cnpj": 1,
+    "duplicate_cnpj": 1
+  },
+  "tempo_segundos": 0.123
+}
+```
 
 Structured logs are written as one JSON object per line to `stderr`. They
 include pipeline start and per-chunk processing events. Use `--log-file` to
 persist them as UTF-8.
 
-## Testing
+### Validation rules
 
-Run unit tests:
+The current implementation validates:
 
-```powershell
-python -m pytest -q
-```
+- CNPJ length, repeated-digit values, and check digits;
+- required CNPJ and company name fields;
+- CEP with eight digits;
+- parseable activity dates;
+- duplicate CNPJs within the same input;
+- UTF-8 input with a controlled Latin-1 fallback.
 
-Run integration tests against the local PostgreSQL container:
-
-```powershell
-$env:TEST_DATABASE_URL = "postgresql+psycopg2://etl_user:etl_password@localhost:5432/etl_data_quality"
-python -m pytest -q
-```
-
-The integration test is skipped when `TEST_DATABASE_URL` is not configured.
-GitHub Actions starts PostgreSQL, initializes the schema, sets this variable,
-and runs the full test suite.
-
-## Real-data demonstration
-
-The optional script fetches one real company record from BrasilAPI and writes a
-small compatible CSV:
-
-```powershell
-python scripts/fetch_real_cnpj_sample.py `
-  --output data/raw/real_cnpj_sample.csv
-
-python -m src.pipeline `
-  --input data/raw/real_cnpj_sample.csv `
-  --load
-```
-
-This is a small demonstration, not a replacement for downloading the official
-large Receita Federal datasets. Raw files are intentionally not versioned.
+Rejected rows include the source line number, original row content, one or
+more rejection reasons, and the processing timestamp.
 
 ## Technical decisions
 
@@ -352,23 +311,113 @@ large Receita Federal datasets. Raw files are intentionally not versioned.
 - **CLI instead of Airflow:** this project has no real users or scheduling
   requirement. Docker Compose plus GitHub Actions provide enough reproducible
   execution for the current scope.
-- **Database initialization:** `sql/init.sql` is the source used by Docker and
-  the CI environment. The runtime calls the batch `upsert_empresas` PL/pgSQL
-  function defined in that schema.
+- **Database initialization:** `sql/init.sql` is the source used by Docker
+  and CI. The runtime calls the batch `upsert_empresas` PL/pgSQL function.
 
-## Known limitations and next improvements
+## Testing and quality
 
-This repository is an academic MVP, not a production ingestion platform. The
-most relevant follow-up work is:
+Run unit tests:
 
-1. add configurable source schemas for datasets other than the sample CNPJ
-   layout;
-2. add retention and partitioning policies for large quarantine tables.
+```bash
+python -m pytest -q
+```
+
+Run integration tests against the local PostgreSQL container:
+
+```bash
+export TEST_DATABASE_URL="postgresql+psycopg2://etl_user:etl_password@localhost:5432/etl_data_quality"
+python -m pytest -q
+```
+
+<details>
+<summary>Windows (PowerShell)</summary>
+
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+psycopg2://etl_user:etl_password@localhost:5432/etl_data_quality"
+python -m pytest -q
+```
+
+</details>
+
+The integration test is skipped when `TEST_DATABASE_URL` is not configured.
+GitHub Actions starts PostgreSQL, initializes the schema, sets this variable,
+and runs the full test suite. The CI quality gate requires 60% measured
+coverage, Ruff, and Pyright.
+
+The optional real-data demonstration fetches one company record from
+BrasilAPI:
+
+```bash
+python scripts/fetch_real_cnpj_sample.py \
+  --output data/raw/real_cnpj_sample.csv
+
+python -m src.pipeline \
+  --input data/raw/real_cnpj_sample.csv \
+  --load
+```
+
+Raw files are intentionally not versioned.
+
+## Project structure
+
+```text
+etl-data-quality/
+├── .github/workflows/ci.yml       # Unit and PostgreSQL integration CI
+├── data/
+│   ├── raw/                       # Local inputs; ignored except fixtures
+│   └── quarantine/                # Generated rejection files
+├── docs/                          # Planning notes and original specification
+├── scripts/
+│   └── fetch_real_cnpj_sample.py # Small public-data demonstration
+├── sql/
+│   ├── init.sql                   # Database initialization
+│   └── procedures/
+│       └── upsert_empresa.sql     # PL/pgSQL reference implementation
+├── src/
+│   ├── db.py                      # SQLAlchemy engine creation
+│   ├── extract.py                 # Raw copy, encoding, and chunk readers
+│   ├── load.py                    # Data and quarantine persistence
+│   ├── observability.py           # JSON logging
+│   ├── pipeline.py                # CLI and orchestration
+│   ├── quality_api.py             # Optional API reporting
+│   ├── schemas.py                 # Shared schema constants/helpers
+│   ├── transform.py               # Canonicalization
+│   └── validate.py                # Data-quality rules
+├── tests/
+│   ├── fixtures/
+│   │   └── sample_dirty_data.csv
+│   ├── test_extract.py
+│   ├── test_integration.py        # Runs when TEST_DATABASE_URL is set
+│   ├── test_observability.py
+│   ├── test_pipeline.py
+│   ├── test_quality_api.py
+│   └── test_validate.py
+├── Dockerfile
+├── docker-compose.yml
+├── LICENSE
+├── pyproject.toml
+├── requirements.txt
+└── README.md
+```
+
+Planning notes and the original specification live in [`docs/`](docs/).
+
+## Known limitations and next steps
+
+This repository is an academic MVP, not a production ingestion platform.
+Known limitations and natural next steps are:
+
+1. the input schema is fixed to the current CNPJ dataset layout;
+2. there is no workflow orchestration or scheduling layer;
+3. API reporting has no authentication mechanism yet;
+4. each Pandas chunk is processed in memory, so larger workloads need a
+   streaming or distributed processing strategy.
+
+## Related projects
+
+- [Data Quality API](https://github.com/davimatosms/data-quality-api) —
+  tracks source checks, data freshness, and quality history.
 
 ## License
 
-This project is released under the MIT License. See `LICENSE`.
-
-The CI quality gate requires 60% measured coverage, Ruff, and Pyright. The
-database engine module is excluded from the coverage threshold because its
-behavior is exercised through the integration environment.
+This project is released under the MIT License. See [LICENSE](LICENSE).
